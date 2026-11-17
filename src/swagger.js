@@ -34,8 +34,9 @@ const fullPath = (name, p) => `/api/${name}${p === '/' ? '' : p}`;
 
 // Short, single-line tag descriptions. Keys are folder (category) names.
 const CATEGORY_INFO = {
-  downloader: 'Downloader media sosial (Facebook, Instagram, dll.)',
-  tools: 'Tools utilitas umum',
+  downloader: 'Downloader platform media sosial',
+  internet: 'Internet-based information and service searches',
+  tools: 'General utility tools',
 };
 
 function operationFor(route, plugin) {
