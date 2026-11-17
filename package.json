@@ -1,0 +1,17 @@
+{
+  "name": "ryhardev-api",
+  "version": "1.0.0",
+  "description": "RyharDev API - multifunction JSON REST API with a drop-in plugin system",
+  "type": "module",
+  "main": "index.js",
+  "engines": { "node": ">=18.17.0" },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "author": "RyharDev (rahardiyan.sang.ceo)",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
