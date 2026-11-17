@@ -37,7 +37,6 @@ const CATEGORY_INFO = {
   downloader: 'Downloader media sosial (Facebook, Instagram, dll.)',
   tools: 'Tools utilitas umum',
 };
-const CORE_TAG = { name: 'main', description: 'Endpoint utama RyharDev API' };
 
 function operationFor(route, plugin) {
   const declared = route.parameters ?? [];
@@ -78,32 +77,8 @@ function operationFor(route, plugin) {
   return operation;
 }
 
-const coreGet = (summary, operationId, data, parameters = []) => ({
-  get: {
-    tags: [CORE_TAG.name],
-    summary,
-    operationId,
-    parameters,
-    responses: {
-      200: successResponse(data),
-      404: errorResponse('Resource not found'),
-      500: errorResponse('Server error'),
-    },
-  },
-});
-
-const CORE_PATHS = {
-  '/api': coreGet('API index', 'core_index', { name: APP.name, version: APP.version }),
-  '/api/status': coreGet('Service status', 'core_status', { state: 'ok', pluginsLoaded: 7 }),
-  '/api/info': coreGet('Application information', 'core_info', { name: APP.name, creator: APP.creator }),
-  '/api/tools': coreGet('List tools (plugins)', 'core_tools', [{ name: 'utility', category: 'utility', version: '1.0.0' }]),
-  '/api/tools/{name}': coreGet('Tool detail', 'core_tool_detail', { name: 'utility', endpoints: [] }, [
-    { name: 'name', in: 'path', required: true, description: 'Nama plugin', schema: { type: 'string' }, example: 'utility' },
-  ]),
-};
-
 export function buildSpec(plugins, baseUrl) {
-  const paths = { ...CORE_PATHS };
+  const paths = { };
 
   // Group plugins by category so each category becomes exactly one tag.
   const categories = new Map();
@@ -124,7 +99,7 @@ export function buildSpec(plugins, baseUrl) {
     const ib = order.indexOf(b) === -1 ? order.length : order.indexOf(b);
     return ia - ib;
   });
-  const tags = [CORE_TAG];
+  const tags = [];
   for (const category of sorted) {
     tags.push({ name: category, description: CATEGORY_INFO[category] ?? CATEGORY_INFO.general });
   }
