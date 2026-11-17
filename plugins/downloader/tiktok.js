@@ -1,21 +1,16 @@
-// TikTok: oEmbed metadata (/info) and media links (/download) with two server variants (srv=1 | srv=2).
-// srv=1 reads the embedded page data and the TikTok player API.
-// srv=2 reads the mobile page data and rewrites /playwm/ to /play/ for a no-watermark link.
+// TikTok: media links (/download) reading embedded page data and the TikTok player API.
 import { success, requireUrl, HttpError } from '../../src/response.js';
 import { upstreamFetch } from '../../src/http.js';
 
 const TIKTOK_HOSTS = ['tiktok.com', 'www.tiktok.com', 'm.tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com'];
-const OEMBED_ENDPOINT = 'https://www.tiktok.com/oembed';
 const ANDROID_UA =
   'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
-const IOS_UA =
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 
 // ---------- helpers ----------
 
 async function resolveShortLink(url) {
   if (!/^(vm|vt)\.tiktok\.com$/.test(new URL(url).hostname)) return url;
-  const res = await upstreamFetch(url, { redirect: 'manual', headers: { 'User-Agent': IOS_UA } });
+  const res = await upstreamFetch(url, { redirect: 'manual', headers: { 'User-Agent': ANDROID_UA } });
   const location = res.headers.get('location');
   if (!location) return url;
   // Validate the redirect target again so a short link cannot send us to another host.
@@ -64,7 +59,6 @@ const pickUrl = (addr) => {
   return null;
 };
 const firstUrl = (v) => (typeof v === 'string' ? v : v?.urlList?.[0] ?? null);
-const noWatermark = (u) => (u ? u.replace('/playwm/', '/play/') : null);
 const imageUrls = (item) => (item.imagePost?.images || []).flatMap((img) => img?.imageURL?.urlList || []);
 
 function shape(item, media) {
@@ -92,9 +86,7 @@ function shape(item, media) {
   };
 }
 
-// ---------- server variants ----------
-
-async function srv1(url) {
+async function fetchMedia(url) {
   const item = await fetchItem(url, ANDROID_UA);
   if (item.imagePost) return shape(item, imageUrls(item));
 
@@ -111,76 +103,19 @@ async function srv1(url) {
   return shape(item, media);
 }
 
-async function srv2(url) {
-  const item = await fetchItem(url, IOS_UA);
-  if (item.imagePost) return shape(item, imageUrls(item));
-
-  return shape(item, [
-    noWatermark(pickUrl(item.video?.playAddr)),
-    noWatermark(pickUrl(item.video?.downloadAddr)),
-  ]);
-}
-
 // ---------- plugin ----------
 
 export default {
   name: 'tiktok',
-  description: 'Metadata video TikTok (oEmbed) dan link media tanpa watermark dengan dua server (srv=1, srv=2).',
+  description: 'Link download video tanpa watermark atau slide gambar TikTok.',
   version: '1.1.0',
   author: 'RyharDev',
   routes: [
     {
       method: 'get',
-      path: '/info',
-      summary: 'Get TikTok video info (oEmbed)',
-      description: 'Metadata publik dari sebuah video TikTok lewat oEmbed resmi. Video private atau dihapus mengembalikan 404.',
-      parameters: [
-        {
-          name: 'url',
-          in: 'query',
-          required: true,
-          description: 'URL video TikTok',
-          schema: { type: 'string', format: 'uri', maxLength: 2048 },
-          example: 'https://www.tiktok.com/@scout2015/video/6718335390845095173',
-        },
-      ],
-      example: {
-        title: 'Contoh judul video',
-        author_name: 'scout2015',
-        author_url: 'https://www.tiktok.com/@scout2015',
-        thumbnail_url: 'https://p16-sign.tiktokcdn.com/example.jpeg',
-        provider_name: 'TikTok',
-      },
-      async handler(req, res) {
-        const target = requireUrl(req.query.url, 'url', TIKTOK_HOSTS);
-        const endpoint = new URL(OEMBED_ENDPOINT);
-        endpoint.searchParams.set('url', target);
-
-        const upstream = await upstreamFetch(endpoint, { headers: { Accept: 'application/json' }, timeout: 8000 });
-        if (upstream.status === 404) throw new HttpError(404, 'Not found', 'Video not found or unavailable', 'NotFoundError');
-        if (!upstream.ok) throw new HttpError(502, 'Upstream error', 'TikTok returned an unexpected response', 'UpstreamError');
-
-        const data = await upstream.json();
-        success(
-          res,
-          {
-            title: data.title ?? null,
-            author_name: data.author_name ?? null,
-            author_url: data.author_url ?? null,
-            thumbnail_url: data.thumbnail_url ?? null,
-            provider_name: data.provider_name ?? 'TikTok',
-          },
-          'Video info retrieved',
-        );
-      },
-    },
-    {
-      method: 'get',
       path: '/download',
       summary: 'Get TikTok media links',
-      description:
-        'Link video tanpa watermark (jika tersedia) atau daftar URL gambar untuk slide post. ' +
-        'srv=1 memakai data halaman dan player API. srv=2 memakai data halaman mobile dan mengganti /playwm/ menjadi /play/.',
+      description: 'Link video tanpa watermark (jika tersedia) atau daftar URL gambar untuk slide post.',
       parameters: [
         {
           name: 'url',
@@ -190,16 +125,8 @@ export default {
           schema: { type: 'string', format: 'uri', maxLength: 2048 },
           example: 'https://vt.tiktok.com/ZSVFvdSTn/',
         },
-        {
-          name: 'srv',
-          in: 'query',
-          required: false,
-          description: 'Server yang dipakai: 1 atau 2',
-          schema: { type: 'string', enum: ['1', '2'], default: '1' },
-        },
       ],
       example: {
-        server: 'srv1',
         id: '6718335390845095173',
         isVideo: true,
         title: 'Contoh judul video',
@@ -211,12 +138,9 @@ export default {
         media: ['https://v16-webapp.tiktok.com/example.mp4'],
       },
       async handler(req, res) {
-        const srv = req.query.srv ?? '1';
-        if (!['1', '2'].includes(srv)) throw new HttpError(400, 'Invalid request', 'Parameter "srv" must be 1 or 2');
-
         const target = await resolveShortLink(requireUrl(req.query.url, 'url', TIKTOK_HOSTS));
-        const data = srv === '2' ? await srv2(target) : await srv1(target);
-        success(res, { server: `srv${srv}`, ...data }, 'Media links retrieved');
+        const data = await fetchMedia(target);
+        success(res, data, 'Media links retrieved');
       },
     },
   ],
