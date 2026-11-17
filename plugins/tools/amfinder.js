@@ -1,177 +1,116 @@
-// TikTok Preset Finder: extract Alight Motion preset links from TikTok comments (/preset).
-import { success, requireUrl, HttpError } from '../../src/response.js';
+// AMFinder: extract Alight Motion preset links (5MB & XML) from TikTok videos via SSE stream (/amfinder).
+import { success, HttpError } from '../../src/response.js';
 import { upstreamFetch } from '../../src/http.js';
 
-const TIKTOK_HOSTS = ['tiktok.com', 'www.tiktok.com', 'm.tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com'];
-const MOBILE_UA =
-  'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
-
-const BASE_HEADERS = {
-  'User-Agent': MOBILE_UA,
-  Accept: 'application/json, text/plain, text/html, */*',
-  Referer: 'https://www.tiktok.com/',
-};
-
-const PRESET_LINK_REGEX = /https?:\/\/(www\.)?(alightcreative\.com\/am\/share\/|alight\.link\/)[^\s'"><]+/gi;
-const ANY_URL_REGEX = /https?:\/\/[^\s'"><]+/gi;
+const AMFINDER_BASE_URL = 'https://amfinder.web.id';
+const TIKTOK_URL_OR_ID_REGEX = /(?:tiktok\.com|^\d{15,}$)/i;
+const STREAM_TIMEOUT_MS = 60_000;
 
 // ---------- helpers ----------
 
-function formatNumber(num) {
-  return Number(num || 0).toLocaleString('id-ID');
-}
-
-function formatTimestamp(unixSeconds) {
-  if (!unixSeconds) return '-';
-  const formatted = new Intl.DateTimeFormat('id-ID', {
-    dateStyle: 'short',
-    timeStyle: 'medium',
-    timeZone: 'Asia/Jakarta',
-  }).format(new Date(unixSeconds * 1000));
-  return `${formatted} WIB`;
-}
-
-async function resolveShortLink(url) {
-  if (!/^(vm|vt)\.tiktok\.com$|\/t\//i.test(url)) return url;
-  const res = await upstreamFetch(url, { redirect: 'manual', headers: BASE_HEADERS });
-  const location = res.headers.get('location');
-  if (!location) return url;
-  return requireUrl(new URL(location, url).toString(), 'redirect', TIKTOK_HOSTS);
-}
-
-function extractVideoId(url) {
-  const match = url.match(/(?:video|photo|v)\/(\d+)/i) || url.match(/(\d{15,22})/);
-  return match?.[1] ?? null;
-}
-
-async function fetchVideoMetadata(videoId) {
-  const fallback = { id: videoId };
-  try {
-    const res = await upstreamFetch(`https://m.tiktok.com/v/${videoId}.html`, { headers: BASE_HEADERS });
-    if (!res.ok) return fallback;
-
-    const html = await res.text();
-    const scriptMatch = html.match(/<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!scriptMatch) return fallback;
-
-    const scope = JSON.parse(scriptMatch[1])?.__DEFAULT_SCOPE__ || {};
-    const item =
-      scope['webapp.video-detail']?.itemInfo?.itemStruct || scope['webapp.reflow.video.detail']?.itemInfo?.itemStruct;
-
-    if (!item) return fallback;
-
-    return {
-      id: item.id || videoId,
-      desc: item.desc || '',
-      author: {
-        username: item.author?.uniqueId || '',
-        nickname: item.author?.nickname || '',
-        verified: Boolean(item.author?.verified),
-      },
-      stats: {
-        likes: item.stats?.diggCount ?? 0,
-        comments: item.stats?.commentCount ?? 0,
-        shares: item.stats?.shareCount ?? 0,
-        views: item.stats?.playCount ?? 0,
-      },
-    };
-  } catch {
-    return fallback;
+function validateTikTokInput(rawInput) {
+  const cleaned = String(rawInput || '').trim();
+  if (!cleaned) {
+    throw new HttpError(400, 'Invalid request', 'Parameter "url" wajib diisi.', 'BadRequestError');
   }
+  if (!TIKTOK_URL_OR_ID_REGEX.test(cleaned)) {
+    throw new HttpError(
+      400,
+      'Invalid request',
+      'Input harus berupa URL video TikTok yang valid atau ID video numerik.',
+      'BadRequestError',
+    );
+  }
+  return cleaned;
 }
 
-function extractPresetLinks(text) {
-  const content = text || '';
-  const presetLinks = content.match(PRESET_LINK_REGEX) || [];
-  const otherLinks = (content.match(ANY_URL_REGEX) || []).filter((link) => !presetLinks.includes(link));
-  return { presetLinks, otherLinks };
-}
+async function parseEventStreamResult(response) {
+  if (!response.body) {
+    throw new HttpError(502, 'Upstream error', 'Server upstream tidak mengembalikan stream data.', 'UpstreamError');
+  }
 
-async function scanPresetsFromComments(videoId) {
-  const seenUrls = new Set();
-  const presets = [];
-  let mainCursor = 0;
-  let hasMoreMain = true;
-  let mainScanned = 0;
-  let replyScanned = 0;
+  const streamReader = response.body.getReader();
+  const textDecoder = new TextDecoder();
+  let streamBuffer = '';
+  let activeEvent = null;
 
-  while (hasMoreMain && mainScanned < 100) {
-    const commentApi = `https://www.tiktok.com/api/comment/list/?aid=1988&app_language=id&app_name=tiktok_web&aweme_id=${videoId}&count=50&cursor=${mainCursor}`;
-    const commentRes = await upstreamFetch(commentApi, { headers: BASE_HEADERS });
-    if (!commentRes.ok) break;
+  while (true) {
+    const { done, value } = await streamReader.read();
+    if (done) break;
 
-    const commentPayload = await commentRes.json();
-    const comments = commentPayload?.comments || [];
-    if (!comments.length) break;
+    streamBuffer += textDecoder.decode(value, { stream: true });
+    const lines = streamBuffer.split('\n');
+    streamBuffer = lines.pop() ?? '';
 
-    for (const comment of comments) {
-      mainScanned++;
-      const { presetLinks, otherLinks } = extractPresetLinks(comment.text);
-
-      for (const presetUrl of presetLinks) {
-        if (!seenUrls.has(presetUrl)) {
-          seenUrls.add(presetUrl);
-          presets.push({
-            url: presetUrl,
-            author: `@${comment.user?.unique_id || 'unknown'} (${comment.user?.nickname || '-'})`,
-            source: 'Komentar Utama',
-            likes: formatNumber(comment.digg_count),
-            date: formatTimestamp(comment.create_time),
-            other_links: otherLinks,
-          });
-        }
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        activeEvent = null;
+        continue;
       }
 
-      if (comment.reply_comment_total > 0) {
-        let replyCursor = 0;
-        let hasMoreReplies = true;
+      if (line.startsWith('event:')) {
+        activeEvent = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        const payloadText = line.slice(5).trim();
 
-        while (hasMoreReplies && replyScanned < 300) {
-          const replyApi = `https://www.tiktok.com/api/comment/list/reply/?aid=1988&app_language=id&app_name=tiktok_web&item_id=${videoId}&comment_id=${comment.cid}&count=20&cursor=${replyCursor}`;
-          const replyRes = await upstreamFetch(replyApi, { headers: BASE_HEADERS });
-          if (!replyRes.ok) break;
-
-          const replyPayload = await replyRes.json();
-          const replies = replyPayload?.comments || [];
-          if (!replies.length) break;
-
-          replyScanned += replies.length;
-
-          for (const reply of replies) {
-            const { presetLinks: replyPresets, otherLinks: replyOtherLinks } = extractPresetLinks(reply.text);
-
-            for (const replyPresetUrl of replyPresets) {
-              if (!seenUrls.has(replyPresetUrl)) {
-                seenUrls.add(replyPresetUrl);
-                presets.push({
-                  url: replyPresetUrl,
-                  author: `@${reply.user?.unique_id || 'unknown'} (${reply.user?.nickname || '-'})`,
-                  source: `Balasan ke @${comment.user?.unique_id || 'unknown'}`,
-                  likes: formatNumber(reply.digg_count),
-                  date: formatTimestamp(reply.create_time),
-                  other_links: replyOtherLinks,
-                });
-              }
-            }
+        if (activeEvent === 'result') {
+          try {
+            return JSON.parse(payloadText);
+          } catch {
+            throw new HttpError(502, 'Upstream error', 'Format data hasil dari server tidak dapat dibaca.', 'UpstreamError');
           }
+        }
 
-          hasMoreReplies = Boolean(replyPayload.has_more);
-          replyCursor = replyPayload.cursor || replyCursor + replies.length;
+        if (activeEvent === 'error') {
+          let errorMessage = 'Terjadi kesalahan saat memproses permintaan di server upstream.';
+          try {
+            const parsedError = JSON.parse(payloadText);
+            if (parsedError?.message) errorMessage = parsedError.message;
+          } catch {
+            // Keep default message if payload is not valid JSON.
+          }
+          throw new HttpError(502, 'Upstream error', errorMessage, 'UpstreamError');
         }
       }
     }
-
-    hasMoreMain = Boolean(commentPayload.has_more);
-    mainCursor = commentPayload.cursor ?? mainCursor + comments.length;
   }
 
+  throw new HttpError(504, 'Gateway timeout', 'Koneksi stream terputus sebelum hasil diterima.', 'TimeoutError');
+}
+
+function normalizePresetResponse(rawPayload) {
+  const videoMeta = rawPayload.video || {};
+  const videoStats = videoMeta.stats || {};
+  const rawPresets = Array.isArray(rawPayload.presetLinks) ? rawPayload.presetLinks : [];
+
   return {
-    scan_stats: {
-      main_comments: mainScanned,
-      reply_comments: replyScanned,
-      total_preset_found: presets.length,
+    author: rawPayload.author || null,
+    avatar: rawPayload.authorDetail?.avatar || null,
+    video: {
+      description: videoMeta.description?.trim() || '',
+      cover: videoMeta.cover || null,
+      play_url: videoMeta.playUrlNoWm || videoMeta.playUrl || null,
+      width: videoMeta.width ?? null,
+      height: videoMeta.height ?? null,
+      stats: {
+        views: videoStats.views ?? null,
+        likes: videoStats.likes ?? null,
+        comments: videoStats.comments ?? null,
+      },
     },
-    presets,
+    total_presets: rawPresets.length,
+    presets: rawPresets.map((item) => ({
+      title: item.title || (item.type === '5mb' ? 'Preset 5MB' : 'File XML'),
+      url: item.url,
+      type: item.type || null,
+      size: item.size || null,
+      ratio: item.ratio || null,
+      thumbnail: item.thumb || null,
+      is_pinned: Boolean(item.pinned),
+      is_by_author: Boolean(item.byAuthor),
+      detail: item.detail || null,
+    })),
   };
 }
 
@@ -179,70 +118,90 @@ async function scanPresetsFromComments(videoId) {
 
 export default {
   name: 'amfinder',
-  description: 'Ekstrak tautan preset Alight Motion dari kolom komentar video TikTok.',
+  description: 'Mencari tautan preset Alight Motion (5MB dan XML) dari tautan atau ID video TikTok.',
   version: '1.0.0',
   author: 'RyharDev',
   routes: [
     {
       method: 'get',
-      path: '/preset',
-      summary: 'Extract Alight Motion presets from TikTok comments',
-      description: 'Memindai komentar utama dan balasan pada video TikTok untuk menemukan tautan preset Alight Motion.',
+      path: '/amfinder',
+      summary: 'Find Alight Motion presets from TikTok video',
+      description: 'Mengambil informasi video TikTok beserta daftar tautan preset Alight Motion yang terdeteksi.',
       parameters: [
         {
           name: 'url',
           in: 'query',
           required: true,
-          description: 'URL video TikTok (mendukung tautan pendek vm/vt.tiktok.com)',
-          schema: { type: 'string', format: 'uri', maxLength: 2048 },
-          example: 'https://vt.tiktok.com/ZSbHnpaX6/',
+          description: 'URL video TikTok (mis. https://vt.tiktok.com/xxx) atau ID video numerik',
+          schema: { type: 'string', maxLength: 2048 },
+          example: 'https://vt.tiktok.com/ZSbmR9kCu/',
         },
       ],
       example: {
-        video_info: {
-          id: '7300000000000000000',
-          desc: 'Contoh deskripsi video preset',
-          author: { username: 'creator', nickname: 'Creator', verified: false },
-          stats: { likes: 1200, comments: 45, shares: 30, views: 15000 },
+        author: 'creator_username',
+        avatar: 'https://p16-sign.tiktokcdn.com/avatar.jpeg',
+        video: {
+          description: 'Contoh deskripsi video preset',
+          cover: 'https://p16-sign.tiktokcdn.com/cover.jpeg',
+          play_url: 'https://v16-webapp.tiktok.com/video.mp4',
+          width: 1080,
+          height: 1920,
+          stats: { views: 15000, likes: 1200, comments: 45 },
         },
-        scan_stats: {
-          main_comments: 50,
-          reply_comments: 20,
-          total_preset_found: 1,
-        },
+        total_presets: 1,
         presets: [
           {
+            title: 'Preset 5MB',
             url: 'https://alight.link/example',
-            author: '@creator (Creator)',
-            source: 'Komentar Utama',
-            likes: '120',
-            date: '17/11/26 13.30.00 WIB',
-            other_links: [],
+            type: '5mb',
+            size: '2.4 MB',
+            ratio: '9:16',
+            thumbnail: null,
+            is_pinned: true,
+            is_by_author: true,
+            detail: null,
           },
         ],
       },
       async handler(req, res) {
-        const rawUrl = requireUrl(req.query.url, 'url', TIKTOK_HOSTS);
-        const resolvedUrl = await resolveShortLink(rawUrl);
+        const targetInput = validateTikTokInput(req.query.url);
+        const endpointUrl = `${AMFINDER_BASE_URL}/api/find?url=${encodeURIComponent(targetInput)}`;
 
-        const videoId = extractVideoId(resolvedUrl);
-        if (!videoId) {
-          throw new HttpError(400, 'Invalid request', 'ID video TikTok tidak ditemukan pada URL yang diberikan', 'BadRequestError');
+        const upstreamResponse = await upstreamFetch(endpointUrl, {
+          method: 'GET',
+          headers: {
+            Accept: 'text/event-stream',
+            'User-Agent': 'Mozilla/5.0 (compatible; RyharDevAPI/1.0)',
+          },
+          timeout: STREAM_TIMEOUT_MS,
+        });
+
+        if (!upstreamResponse.ok) {
+          throw new HttpError(
+            502,
+            'Upstream error',
+            `Server upstream merespons dengan status HTTP ${upstreamResponse.status}.`,
+            'UpstreamError',
+          );
         }
 
-        const [videoInfo, scanResult] = await Promise.all([
-          fetchVideoMetadata(videoId),
-          scanPresetsFromComments(videoId),
-        ]);
+        const contentType = upstreamResponse.headers.get('content-type') || '';
+        if (!contentType.includes('text/event-stream')) {
+          throw new HttpError(502, 'Upstream error', 'Format respons server tidak sesuai dengan stream yang diharapkan.', 'UpstreamError');
+        }
 
-        success(
-          res,
-          {
-            video_info: videoInfo,
-            ...scanResult,
-          },
-          'Pemindaian tautan preset selesai',
-        );
+        const streamPayload = await parseEventStreamResult(upstreamResponse);
+        if (streamPayload.ok === false) {
+          throw new HttpError(
+            422,
+            'Unprocessable entity',
+            streamPayload.error || 'Tautan video tidak dapat diproses oleh layanan pencari preset.',
+            'ProcessingError',
+          );
+        }
+
+        const formattedData = normalizePresetResponse(streamPayload);
+        success(res, formattedData, 'Data preset Alight Motion berhasil diambil');
       },
     },
   ],
