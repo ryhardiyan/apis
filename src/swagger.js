@@ -35,10 +35,7 @@ const fullPath = (name, p) => `/api/${name}${p === '/' ? '' : p}`;
 // Short, single-line tag descriptions. Keys are folder (category) names.
 const CATEGORY_INFO = {
   downloader: 'Downloader media sosial (Facebook, Instagram, dll.)',
-  domain: 'Cek ketersediaan dan informasi domain',
-  utility: 'Tools utilitas umum',
-  whatsapp: 'Tools pendukung bot WhatsApp',
-  general: 'Endpoint lainnya',
+  tools: 'Tools utilitas umum',
 };
 const CORE_TAG = { name: 'main', description: 'Endpoint utama RyharDev API' };
 
